@@ -1,0 +1,115 @@
+# Push a tag v<version> (the version in Cargo.toml) to build the plugin with its engine and model for
+# Linux (x86-64 and 64-bit ARM, a Raspberry Pi with a 64-bit OS) and publish a GitHub release:
+#
+#   neural-vocoder-<version>-<target>.tar.gz   the plugin, the engine, its libraries, the model
+#   neural-vocoder-<version>.manifest.json     what `neural-vocoder --describe` prints
+#   SHA256SUMS                                 what the registry pins
+#
+# Each file also gets a build provenance attestation (`gh attestation verify <file> --repo <owner>/<repo>`).
+# The names are what the recorder's installer looks for: keep them.
+#
+# Built on Ubuntu 22.04 (glibc 2.35), so it runs on Raspberry Pi OS bookworm and newer; the plugin
+# itself against glibc 2.28. The model is the one scripts/model.env names, checked by its SHA-256.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  meta:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.m.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: m
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "::error::tag $GITHUB_REF_NAME isn't v$version (Cargo.toml)"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, arch: x86_64, cross: "" }
+          - { target: aarch64-unknown-linux-gnu, arch: aarch64, cross: aarch64-linux-gnu- }
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.target }}" }
+      - uses: Swatinem/rust-cache@v2
+        with: { key: "${{ matrix.target }}" }
+
+      - name: Cross compiler
+        if: matrix.cross != ''
+        run: sudo apt-get update -q && sudo apt-get install -yq gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Engine
+        run: make -C engine CROSS=${{ matrix.cross }}
+
+      - name: Plugin
+        run: |
+          pip install ziglang
+          cargo install cargo-zigbuild --locked
+          cargo zigbuild --locked --release --target ${{ matrix.target }}.2.28
+
+      - name: Model
+        run: |
+          . scripts/model.env
+          curl -fsSL -o model.onnx "$MODEL_URL"
+          echo "$MODEL_SHA256  model.onnx" | sha256sum -c
+
+      - name: It runs, says who it is, and the engine loads the model
+        if: matrix.arch == 'x86_64'
+        run: |
+          target/${{ matrix.target }}/release/neural-vocoder --describe > manifest.json
+          python3 .github/check_manifest.py manifest.json --release
+          [ "$(printf '\n' | engine/build/x86_64/p25voc -m model.onnx -l 2>/dev/null)" = ready ]
+
+      - name: Package
+        run: |
+          scripts/package.sh ${{ matrix.target }} target/${{ matrix.target }}/release/neural-vocoder \
+              engine/build/${{ matrix.arch }} model.onnx
+          if [ ${{ matrix.arch }} = x86_64 ]; then cp manifest.json "dist/neural-vocoder-$VERSION.manifest.json"; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    needs: [meta, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { pattern: dist-*, path: dist, merge-multiple: true }
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - name: Release notes (this version's section of CHANGELOG.md)
+        run: |
+          v="${{ needs.meta.outputs.version }}"
+          awk -v v="## [$v]" 'index($0, v) == 1 {on = 1; next} on && /^## / {exit} on' CHANGELOG.md > notes.md 2>/dev/null || true
+          [ -s notes.md ] || echo "neural-vocoder $v" > notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: notes.md
+          files: dist/*

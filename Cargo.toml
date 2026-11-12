@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.99"
 description = "Writes a neural-vocoded copy of every P25 Phase 1 call (.neural.wav or .neural.m4a, 16 kHz) beside the recorder's own audio."
 license = "GPL-3.0-or-later"
-repository = "https://github.com/trunk-reporter/trunk-plugin-neural-vocoder"
+repository = "https://github.com/trunk-reporter/trp-plugin-neural-vocoder"
 publish = false
 
 [dependencies]
