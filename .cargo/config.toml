@@ -1,0 +1,4 @@
+# Cross builds for a Raspberry Pi (cargo build --release --target aarch64-unknown-linux-gnu)
+# link with the GNU cross toolchain (Arch: aarch64-linux-gnu-gcc).
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
